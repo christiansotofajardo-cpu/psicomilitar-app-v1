@@ -1,324 +1,206 @@
-
-# app.py — Psicomilitar v1.2 (Streamlit, flujo simple sin API)
-# Modo candidate: captura respuestas, NO muestra resultados.
-# Modo admin: bandeja, cálculo TRPMI-20 + Raven, IGIM y PDF.
-#
-# Variables de entorno:
-#   APP_MODE=candidate | admin
-#   ADMIN_PASSWORD=tu_clave  (solo en admin)
-#   DATA_FILE=submissions.csv (opcional)
-
-import os, io, json
+# -*- coding: utf-8 -*-
+import io
 from datetime import datetime
+from typing import List, Dict, Any
+
 import pandas as pd
 import streamlit as st
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm
 
-APP_MODE = os.getenv("APP_MODE", "candidate").lower()  # 'candidate' | 'admin'
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
-DATA_FILE = os.getenv("DATA_FILE", "submissions.csv")
+APP_TITLE = "PsicoMilitar – Cuestionario Breve"
+PROJECT_CODE = "psicomilitar-app-v1"
 
-st.set_page_config(page_title="Psicomilitar v1.2", page_icon="🛡️", layout="wide")
-
-# ------- Especificación de test -------
-LIKERT_BIN = [{"label": "No", "score": 0}, {"label": "Sí", "score": 1}]
-
-TESTS = {
-    "TRPMI-20 (Riesgo Psicológico Militar)": {
-        "etiqueta": "TRPMI-20 (Tamizaje clínico)",
-        "descripcion": "SRQ‑20 adaptado (20 ítems Sí/No). Corte: 0–6 Apto; 7–10 Apto con observación; ≥11 No apto.",
-        "opciones": LIKERT_BIN,
-        "items": [
-            "¿Se ha sentido nervioso/a o en tensión en los últimos días?",
-            "¿Ha sentido preocupación persistente difícil de controlar?",
-            "¿Ha notado tristeza, desánimo o pérdida de esperanza?",
-            "¿Ha perdido interés o placer en actividades habituales?",
-            "¿Ha tenido dificultad para disfrutar o sentir ánimo?",
-            "¿Ha tenido problemas para concentrarse en tareas simples?",
-            "¿Se le olvidan cosas con mayor frecuencia de lo habitual?",
-            "¿Ha presentado irritabilidad que afecta su convivencia?",
-            "¿Ha sentido dolores físicos (cabeza/estómago) sin causa clara?",
-            "¿Ha tenido molestias corporales relacionadas con el estrés?",
-            "¿Dificultad para relajarse o sentirse en calma?",
-            "¿Problemas de sueño (insomnio, despertar frecuente)?",
-            "¿Ha tenido conductas impulsivas con riesgo operacional?",
-            "¿Le cuesta interactuar/coordinarse con su equipo?",
-            "¿Ha tenido sensación de inutilidad o culpa excesiva?",
-            "¿Pensamientos negativos persistentes sobre sí mismo/a?",
-            "¿Sensación de vigilancia/alerta excesiva en todo momento?",
-            "¿Miedo a que ocurra algo malo sin motivo concreto?",
-            "¿Dificultad para seguir instrucciones bajo presión?",
-            "¿Ha pensado que no podría controlar una situación crítica?",
-        ],
-        "cutoffs": [(0,6,"Apto"), (7,10,"Apto con observación"), (11,20,"No apto")],
-    },
+LIKERT = {
+    "1 = En total desacuerdo": 1,
+    "2 = En desacuerdo": 2,
+    "3 = Ni de acuerdo ni en desacuerdo": 3,
+    "4 = De acuerdo": 4,
+    "5 = Totalmente de acuerdo": 5,
 }
 
-def calcular_puntaje(respuestas, opciones):
-    return sum(opciones[r]["score"] for r in respuestas if r is not None)
+ITEMS = [
+    "He notado que la persona maneja mejor sus emociones.",
+    "Se relaciona de manera más respetuosa y pacífica con su entorno.",
+    "Muestra mayor autonomía y confianza para asumir responsabilidades.",
+    "Aplica en su vida algunas estrategias aprendidas.",
+    "La participación en el proceso ha sido beneficiosa para su desarrollo.",
+]
 
-def interpretar_cutoffs(total, cutoffs):
-    for lo, hi, label in cutoffs:
-        if lo <= total <= hi:
-            return label
-    return "Sin interpretación"
-
-def exportar_pdf(datos_generales, resultado_dict, igim_label=None, filename_prefix="reporte_psicomilitar"):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    w, h = A4
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(2*cm, h-2*cm, "Reporte Psicomilitar – Evaluación")
-    c.setFont("Helvetica", 10)
-    c.drawString(2*cm, h-2.6*cm, f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')} hrs")
-    y = h - 3.4*cm
-
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2*cm, y, "Datos del evaluado")
-    y -= 0.5*cm
-    c.setFont("Helvetica", 10)
-    for k, v in datos_generales.items():
-        c.drawString(2*cm, y, f"{k}: {v}")
-        y -= 0.45*cm
-
-    if igim_label:
-        y -= 0.2*cm
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(2*cm, y, "Índice Global de Idoneidad Militar (IGIM)")
-        y -= 0.5*cm
-        c.setFont("Helvetica", 10)
-        c.drawString(2*cm, y, f"IGIM: {igim_label}")
-        y -= 0.6*cm
-
-    y -= 0.2*cm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2*cm, y, "Resultados por instrumento")
-    y -= 0.5*cm
-    c.setFont("Helvetica", 10)
-    for test_name, res in resultado_dict.items():
-        line = f"• {test_name}: Puntaje {res.get('total','-')} / Nivel: {res.get('nivel','-')}"
-        c.drawString(2*cm, y, line)
-        y -= 0.45*cm
-        if y < 3*cm:
-            c.showPage()
-            y = h - 2*cm
-
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer, f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-
-def _ensure_store(file):
-    if not os.path.exists(file):
-        pd.DataFrame([]).to_csv(file, index=False)
-
-def save_submission(payload: dict):
-    _ensure_store(DATA_FILE)
-    try:
-        df = pd.read_csv(DATA_FILE)
-    except Exception:
-        df = pd.DataFrame([])
-    df = pd.concat([df, pd.DataFrame([payload])], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
-
-# Sidebar
-mode_badge = "CANDIDATO" if APP_MODE == "candidate" else "ADMINISTRADOR"
-st.sidebar.markdown(f"### 🛡️ Psicomilitar v1.2  \n**Modo:** {mode_badge}")
-if APP_MODE == "candidate":
-    st.sidebar.info("Complete sus cuestionarios. Sus resultados serán revisados por el equipo evaluador.")
-else:
-    st.sidebar.warning("Acceso restringido a personal autorizado.")
-
-# =================== MODO CANDIDATO ===================
-if APP_MODE == "candidate":
-    st.title("🧾 Evaluación Psicomilitar – Candidato")
-    st.caption("Sus respuestas serán tratadas de forma confidencial y revisadas por profesionales autorizados.")
-
-    with st.expander("Identificación (requerido)", expanded=True):
-        colA, colB, colC, colD = st.columns([1.2,1.2,1.2,1])
-        with colA:
-            nombre = st.text_input("Nombre completo")
-        with colB:
-            rut = st.text_input("RUT / ID")
-        with colC:
-            unidad = st.text_input("Unidad/Regimiento")
-        with colD:
-            edad = st.number_input("Edad", min_value=16, max_value=80, value=25)
-
-    st.subheader("TRPMI-20 – Responda Sí/No")
-    spec = TESTS["TRPMI-20 (Riesgo Psicológico Militar)"]
-    trp_resps = []
-    for i, texto in enumerate(spec["items"], start=1):
-        idx = st.radio(
-            f"{i}. {texto}",
-            options=[0,1],
-            format_func=lambda x: spec["opciones"][x]["label"],
-            key=f"TRPMI_{i}",
-            horizontal=True,
+def _init_state():
+    if "responses" not in st.session_state:
+        st.session_state.responses = pd.DataFrame(
+            columns=[
+                "timestamp", "id_sujeto", *[f"item_{i+1}" for i in range(len(ITEMS))],
+                "comentarios", "consentimiento", "proyecto"
+            ]
         )
-        trp_resps.append(idx)
 
-    st.subheader("Raven – Captura de datos (sin mostrar clasificación)")
-    colr1, colr2, colr3 = st.columns([1,1,1])
-    with colr1:
-        raven_version = st.selectbox("Versión", ["SPM‑R", "APM‑R"], key="RAVEN_ver")
-    with colr2:
-        total_items = st.number_input("Nº ítems (36–60)", min_value=10, max_value=60, value=36, step=1, key="RAVEN_n")
-    with colr3:
-        raw_correct = st.number_input("Aciertos (raw)", min_value=0, max_value=60, value=0, step=1, key="RAVEN_raw")
-    pct_known = st.checkbox("Tengo percentil oficial (entregado por el evaluador)")
-    pct_value = st.number_input("Percentil (0–99)", min_value=0, max_value=99, value=50, step=1, disabled=not pct_known)
+def save_response(row: Dict[str, Any]):
+    st.session_state.responses = pd.concat(
+        [st.session_state.responses, pd.DataFrame([row])],
+        ignore_index=True
+    )
 
-    if st.button("Enviar evaluación"):
-        if not (nombre and rut):
-            st.warning("Completa Nombre y RUT/ID antes de enviar.")
-        else:
-            payload = {
-                "timestamp": datetime.now().isoformat(),
-                "nombre": nombre,
-                "rut": rut,
-                "unidad": unidad,
-                "edad": edad,
-                "TRPMI20_answers": trp_resps,
-                "Raven_version": raven_version,
-                "Raven_items": int(total_items),
-                "Raven_raw": int(raw_correct),
-                "Raven_pct": int(pct_value) if pct_known else None,
-            }
-            save_submission(payload)
-            st.success("Gracias, su evaluación ha sido enviada. Un profesional revisará sus resultados.")
-            st.stop()
+def download_bytes_csv(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding="utf-8")
+    return buf.getvalue().encode("utf-8")
 
-# =================== MODO ADMIN ===================
-if APP_MODE == "admin":
-    st.title("🛡️ Consola Psicomilitar – Administrador")
+def resumen_tabla(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    cols = [c for c in df.columns if c.startswith("item_")]
+    desc = df[cols].describe().T
+    desc = desc[["count", "mean", "std", "min", "25%", "50%", "75%", "max"]]
+    desc.index.name = "ítem"
+    return desc.round(2)
+
+def main():
+    st.set_page_config(page_title=APP_TITLE, page_icon="✅", layout="centered")
+    _init_state()
+
+    st.title(APP_TITLE)
+    st.caption("App simple de captura y síntesis de respuestas. Construida con Streamlit.")
 
     with st.sidebar:
-        st.subheader("Acceso")
-        pwd = st.text_input("Contraseña", type="password")
-        logged = st.button("Ingresar")
-    if not (logged and pwd == ADMIN_PASSWORD):
-        st.info("Ingrese su contraseña para acceder a la bandeja de casos.")
-        st.stop()
+        st.markdown("### Navegación")
+        view = st.radio(
+            "Secciones",
+            ["Aplicar cuestionario", "Cargar/descargar datos", "Resumen"],
+            index=0
+        )
+        st.divider()
+        st.markdown("**Proyecto:**")
+        st.code(PROJECT_CODE, language="markdown")
 
-    st.subheader("Bandeja de evaluaciones recibidas")
-    try:
-        df = pd.read_csv(DATA_FILE)
-    except Exception:
-        df = pd.DataFrame([])
-    if df.empty:
-        st.warning("Sin evaluaciones aún.")
-        st.stop()
+    if view == "Aplicar cuestionario":
+        st.header("Aplicar cuestionario (Likert 1–5)")
+        with st.form("form_respuestas", clear_on_submit=False):
+            id_sujeto = st.text_input("ID sujeto / código interno", max_chars=64)
 
-    colf1, colf2 = st.columns([1,1])
-    with colf1:
-        f_unidad = st.text_input("Filtrar por Unidad/Regimiento")
-    with colf2:
-        f_rut = st.text_input("Filtrar por RUT/ID")
+            valores: List[int] = []
+            for i, item in enumerate(ITEMS, start=1):
+                sel = st.select_slider(
+                    f"{i}. {item}",
+                    options=list(LIKERT.keys()),
+                    value="3 = Ni de acuerdo ni en desacuerdo",
+                    help="Arrastra para elegir el grado de acuerdo."
+                )
+                valores.append(LIKERT[sel])
 
-    view = df.copy()
-    if f_unidad:
-        view = view[view["unidad"].astype(str).str.contains(f_unidad, case=False, na=False)]
-    if f_rut:
-        view = view[view["rut"].astype(str).str.contains(f_rut, case=False, na=False)]
+            comentarios = st.text_area("Comentarios (opcional)", max_chars=1500)
+            consentimiento = st.checkbox(
+                "Declaro consentimiento informado para registrar y analizar estas respuestas.",
+                value=False
+            )
 
-    st.dataframe(view.fillna(""))
+            submit = st.form_submit_button("Guardar respuesta")
 
-    st.markdown("---")
-    st.subheader("Ficha de caso")
-    sel_idx = st.number_input("Índice de fila (0..N)", min_value=0, max_value=max(0, len(view)-1), value=0, step=1)
+        if submit:
+            if not id_sujeto.strip():
+                st.error("Por favor, ingresa un **ID de sujeto**.")
+            elif not consentimiento:
+                st.error("Debes marcar el **consentimiento** para guardar.")
+            else:
+                row = {
+                    "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "id_sujeto": id_sujeto.strip(),
+                    **{f"item_{i+1}": v for i, v in enumerate(valores)},
+                    "comentarios": comentarios.strip(),
+                    "consentimiento": bool(consentimiento),
+                    "proyecto": PROJECT_CODE,
+                }
+                save_response(row)
+                st.success("✅ Respuesta guardada correctamente.")
+                st.toast("Guardado", icon="✅")
 
-    if len(view) > 0:
-        row = view.iloc[int(sel_idx)]
-        colA, colB, colC, colD = st.columns([1.2,1.2,1.2,1])
-        with colA:
-            st.text_input("Nombre", value=str(row.get("nombre","")), disabled=True)
-        with colB:
-            st.text_input("RUT/ID", value=str(row.get("rut","")), disabled=True)
-        with colC:
-            st.text_input("Unidad", value=str(row.get("unidad","")), disabled=True)
-        with colD:
-            st.number_input("Edad", value=int(row.get("edad",0) or 0), disabled=True)
+        st.divider()
+        if not st.session_state.responses.empty:
+            st.subheader("Últimas respuestas (vista rápida)")
+            st.dataframe(st.session_state.responses.tail(10), use_container_width=True, height=280)
 
-        # TRPMI
-        spec = TESTS["TRPMI-20 (Riesgo Psicológico Militar)"]
-        # leer lista desde CSV (string) de forma robusta
-        trp_answers = []
-        raw = str(row.get("TRPMI20_answers", "[]"))
-        try:
-            trp_answers = [int(x) for x in json.loads(raw.replace("'", "\""))]
-        except Exception:
+    elif view == "Cargar/descargar datos":
+        st.header("Cargar/descargar datos")
+
+        st.subheader("Descargar CSV")
+        if st.session_state.responses.empty:
+            st.info("Aún no hay respuestas para descargar.")
+        else:
+            st.download_button(
+                "⬇️ Descargar respuestas (CSV)",
+                data=download_bytes_csv(st.session_state.responses),
+                mime="text/csv",
+                file_name=f"{PROJECT_CODE}_respuestas.csv",
+            )
+
+        st.divider()
+        st.subheader("Cargar CSV y fusionar")
+        st.caption("Debes subir un CSV con el mismo esquema de columnas.")
+        up = st.file_uploader("Selecciona un archivo CSV", type=["csv"])
+        if up is not None:
             try:
-                trp_answers = [int(x) for x in eval(raw)]
-            except Exception:
-                trp_answers = []
-        trp_total = calcular_puntaje(trp_answers, spec["opciones"]) if trp_answers else 0
-        trp_nivel = interpretar_cutoffs(trp_total, spec["cutoffs"]) if trp_answers else "N/A"
+                df_new = pd.read_csv(up)
+                required_cols = set(st.session_state.responses.columns)
+                if not required_cols.issubset(set(df_new.columns)):
+                    st.error("El CSV no tiene el mismo esquema de columnas que la app.")
+                else:
+                    before = len(st.session_state.responses)
+                    st.session_state.responses = pd.concat(
+                        [st.session_state.responses, df_new[st.session_state.responses.columns]],
+                        ignore_index=True
+                    ).drop_duplicates().reset_index(drop=True)
+                    after = len(st.session_state.responses)
+                    st.success(f"✅ Carga exitosa. Filas agregadas: {after - before}.")
+            except Exception as e:
+                st.exception(e)
 
-        # Raven
-        raven_version = row.get("Raven_version", "SPM‑R")
-        raven_items = int(row.get("Raven_items", 36) or 36)
-        raven_raw = int(row.get("Raven_raw", 0) or 0)
-        pct_from_store = row.get("Raven_pct", None)
-        try:
-            pct_from_store = int(pct_from_store)
-        except Exception:
-            pct_from_store = None
+        st.divider()
+        st.subheader("Vista de datos completa")
+        st.dataframe(st.session_state.responses, use_container_width=True, height=360)
 
-        st.markdown("#### Raven – Puntuación y clasificación")
-        colr1, colr2, colr3 = st.columns([1,1,1])
-        with colr1:
-            st.text_input("Versión", value=str(raven_version), disabled=True)
-        with colr2:
-            st.number_input("Nº ítems", value=int(raven_items), disabled=True)
-        with colr3:
-            st.number_input("Aciertos", value=int(raven_raw), disabled=True)
+    else:  # Resumen
+        st.header("Resumen de resultados")
+        df = st.session_state.responses.copy()
 
-        use_official = st.checkbox("Ingresar/usar percentil oficial", value=pct_from_store is not None)
-        if use_official:
-            pct = st.number_input("Percentil (0–99)", min_value=0, max_value=99, value=int(pct_from_store or 50))
+        if df.empty:
+            st.info("Aún no hay datos para resumir.")
+            return
+
+        # Puntaje total simple por sujeto (promedio de ítems)
+        item_cols = [c for c in df.columns if c.startswith("item_")]
+        df["puntaje_promedio"] = df[item_cols].mean(axis=1)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Respuestas totales", len(df))
+            st.metric("Promedio global (1–5)", round(df["puntaje_promedio"].mean(), 2))
+        with c2:
+            st.metric("Desv. estándar global", round(df["puntaje_promedio"].std(ddof=0), 2))
+            st.metric("Ítems por respuesta", len(item_cols))
+
+        st.subheader("Estadísticos por ítem")
+        tabla = resumen_tabla(df)
+        st.dataframe(tabla, use_container_width=True, height=320)
+
+        st.subheader("Distribución de puntaje promedio")
+        st.caption("Histograma simple (bin = 0.5)")
+        st.bar_chart(
+            df["puntaje_promedio"]
+            .round(1)
+            .value_counts()
+            .sort_index()
+        )
+
+        st.divider()
+        st.subheader("Muestra de comentarios")
+        muestra = df[df["comentarios"].notna() & (df["comentarios"].str.strip() != "")]
+        if muestra.empty:
+            st.write("No hay comentarios registrados.")
         else:
-            pct = int(round((raven_raw / max(raven_items,1)) * 100))
-            st.caption(f"Estimación preliminar de percentil ≈ {pct}")
+            for _, r in muestra.tail(8).iterrows():
+                st.markdown(
+                    f"**{r['id_sujeto']}** — *{r['timestamp']}*  \n"
+                    f"{r['comentarios']}"
+                )
 
-        if pct >= 90:
-            raven_label = "Superior"
-        elif 75 <= pct <= 89:
-            raven_label = "Promedio Alto"
-        elif 25 <= pct <= 74:
-            raven_label = "Promedio"
-        elif 10 <= pct <= 24:
-            raven_label = "Promedio Bajo"
-        else:
-            raven_label = "Inferior"
-
-        st.success(f"**Clasificación Raven:** {raven_label} (pctl {pct}) • Aciertos {raven_raw}/{raven_items} – {raven_version}")
-
-        # IGIM simple
-        igim = "N/A"
-        if trp_nivel != "N/A":
-            if trp_nivel == "No apto":
-                igim = "No apto"
-            elif trp_nivel == "Apto con observación":
-                igim = "Apto con observación" if raven_label in ["Promedio", "Promedio Alto", "Superior"] else "Derivar/Observar"
-            else:  # Apto
-                igim = "Apto" if raven_label in ["Promedio Bajo", "Promedio", "Promedio Alto", "Superior"] else "Apto con observación"
-
-        st.markdown("#### Síntesis clínica-cognitiva (IGIM v1)")
-        st.info(f"TRPMI-20: {trp_total} → {trp_nivel}  |  Raven: {raven_label} (pctl {pct})  |  **IGIM**: {igim}")
-
-        resultados = {
-            "TRPMI-20 (Riesgo Psicológico Militar)": {"total": trp_total, "nivel": trp_nivel},
-            "Raven (SPM‑R/APM‑R) — Puntuación": {"total": raven_raw, "nivel": raven_label, "percentil": pct, "version": raven_version},
-        }
-
-        st.markdown("---")
-        st.subheader("Exportar reporte PDF (solo admin)")
-        if st.button("Generar PDF oficial"):
-            datos = {"Nombre": row.get("nombre",""), "RUT/ID": row.get("rut",""), "Unidad": row.get("unidad",""), "Edad": row.get("edad","")}
-            pdf_buffer, fname = exportar_pdf(datos, resultados, igim_label=igim)
-            st.download_button("Descargar PDF", data=pdf_buffer, file_name=fname, mime="application/pdf")
-
-st.caption("© Psicomilitar v1.2 – Núcleo modular; resultados solo visibles en consola admin. Cumplimiento: sin reproducción de ítems Raven; se captura aciertos/percentil.")
+if __name__ == "__main__":
+    main()
